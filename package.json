@@ -16,8 +16,8 @@
   },
   "devDependencies": {
     "@types/node": "^9.6.35",
-    "microbundle": "^0.6.0",
-    "serve": "^10.0.2",
+    "microbundle": "^0.12.3",
+    "serve": "^11.3.2",
     "tslint": "^5.11.0",
     "tslint-config-airbnb": "^5.11.0",
     "typescript": "^3.5.3"

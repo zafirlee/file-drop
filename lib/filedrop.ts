@@ -2,7 +2,6 @@
 function getMatchingItems(list: DataTransferItemList, acceptVal: string, multiple: boolean): DataTransferItem[] {
   const dataItems = Array.from(list);
   let results: DataTransferItem[];
-
   // Return the first item (or undefined) if our filter is for all files
   if (acceptVal === '') {
     results = dataItems.filter(item => item.kind === 'file');
@@ -15,9 +14,12 @@ function getMatchingItems(list: DataTransferItemList, acceptVal: string, multipl
   }).filter(acceptParts => acceptParts.length === 2); // Filter invalid values
 
   const predicate = (item:DataTransferItem) => {
-    if (item.kind !== 'file') return false;
-
+    // const file = item.webkitGetAsEntry();
     // 'Parse' the type.
+    if (item.webkitGetAsEntry() && item.webkitGetAsEntry().isDirectory) {
+      return true;
+    }
+    if (item.kind !== 'file') return false;
     const [typeMain, typeSub] = item.type.toLowerCase().split('/').map(s => s.trim());
 
     for (const [acceptMain, acceptSub] of accepts) {
@@ -33,22 +35,7 @@ function getMatchingItems(list: DataTransferItemList, acceptVal: string, multipl
   if (multiple === false) {
     results = [results[0]];
   }
-
   return results;
-}
-
-function getFileData(data: DataTransfer, accept: string, multiple: boolean): File[] {
-  const dragDataItems = getMatchingItems(data.items, accept, multiple);
-  const files: File[] = [];
-
-  // This is because Map doesn't like the null type returned by getAsFile
-  dragDataItems.forEach((item) => {
-    const file = item.getAsFile();
-    if (file === null) return;
-    files.push(file);
-  });
-
-  return files;
 }
 
 // Safari and Edge don't quite support extending Event, this works around it.
@@ -57,17 +44,22 @@ function fixExtendedEvent(instance: Event, type: Function) {
     Object.setPrototypeOf(instance, type.prototype);
   }
 }
+interface FileObj {
+  file:File;
+  path:String;
+}
 
 interface FileDropEventInit extends EventInit {
   action: FileDropAccept;
-  files: File[];
+  files: FileObj[];
 }
 
 type FileDropAccept = 'drop' | 'paste';
 
 export class FileDropEvent extends Event {
   private _action: FileDropAccept;
-  private _files: File[];
+  private _files: FileObj[];
+
   constructor(typeArg: string, eventInitDict: FileDropEventInit) {
     super(typeArg, eventInitDict);
     fixExtendedEvent(this, FileDropEvent);
@@ -99,6 +91,8 @@ export class FileDropEvent extends Event {
 export class FileDropElement extends HTMLElement {
 
   private _dragEnterCount = 0;
+  private _dragFileCount = 0;
+  private files:FileObj[] = [];
 
   constructor() {
     super();
@@ -133,6 +127,80 @@ export class FileDropElement extends HTMLElement {
     this.setAttribute('multiple', val || '');
   }
 
+  get directory() : string | null {
+    return this.getAttribute('directory');
+  }
+
+  set directory(val: string | null) {
+    this.setAttribute('directory', val || '');
+  }
+
+  // tslint:disable-next-line:max-line-length
+  private getFileData(data: DataTransfer, accept: string, multiple: boolean, directory:boolean, action:string): FileObj[] {
+    const dragDataItems = getMatchingItems(data.items, accept, multiple);
+    // const files: FileObj[] = [];
+    // This is because Map doesn't like the null type returned by getAsFile
+    dragDataItems.forEach((item) => {
+      const file = item.webkitGetAsEntry();
+      if (file === null) return;
+      // @ts-ignore
+      this.traverseFileTree(file, '', accept, action, 1);
+      // files.push(file);
+      // files.concat(checkFolders(item));
+    });
+
+    return this.files;
+  }
+
+  // tslint:disable-next-line:max-line-length
+  private traverseFileTree(item:any, path: string | undefined, acceptVal: string, action:FileDropAccept, reduce:number) {
+    // tslint:disable-next-line:no-parameter-reassignment
+    path = path || '';
+    // tslint:disable-next-line:no-this-assignment
+    const _mySelf = this;
+    if (item.isFile) {
+      this._dragFileCount += 1;
+      item.file((myFile:File) => {
+        _mySelf._dragFileCount -= reduce;
+        console.log(_mySelf._dragFileCount, reduce);
+        const accepts = acceptVal.toLowerCase().split(',').map((accept) => {
+          return accept.split('/').map(part => part.trim());
+        }).filter(acceptParts => acceptParts.length === 2); // Filter invalid values
+        const [typeMain, typeSub] = myFile.type.toLowerCase().split('/').map(s => s.trim());
+        for (const [acceptMain, acceptSub] of accepts) {
+          // Look for an exact match, or a partial match if * is accepted, eg image/*.
+          if (typeMain === acceptMain && (acceptSub === '*' || typeSub === acceptSub)) {
+            const obj:FileObj = {
+              file:myFile,
+              // @ts-ignore
+              path: path + myFile.name,
+            };
+            _mySelf.files.push(obj);
+            if (_mySelf._dragFileCount <= 0) {
+              const files = _mySelf.files;
+              this.dispatchEvent(new FileDropEvent('filedrop', { files, action }));
+            }
+            return true;
+          }
+        }
+      });
+      // @ts-ignore
+    } else if (item.isDirectory) {
+      const dirReader = item.createReader();
+      dirReader.readEntries((entries:any) => {
+        // tslint:disable-next-line:no-increment-decrement
+        this._dragFileCount += entries.length + 1 - reduce;
+        console.log(this._dragFileCount, 'ccc', item.name);
+        // tslint:disable-next-line:no-increment-decrement
+        for (const eItem of entries) {
+          // tslint:disable-next-line:prefer-template
+          this.traverseFileTree(eItem, path + item.name + '/', acceptVal, action, 2);
+        }
+      });
+    }
+    return this.files;
+  }
+
   private _onDragEnter(event: DragEvent) {
     this._dragEnterCount += 1;
     if (this._dragEnterCount > 1) return;
@@ -143,6 +211,7 @@ export class FileDropElement extends HTMLElement {
 
     // We don't have data, attempt to get it and if it matches, set the correct state.
     const items = event.dataTransfer.items;
+    // tslint:disable-next-line:max-line-length
     const matchingFiles = getMatchingItems(items, this.accept, (this.multiple !== null));
     const validDrop: boolean = event.dataTransfer && event.dataTransfer.items.length ?
       (matchingFiles[0] !== undefined) :
@@ -169,22 +238,24 @@ export class FileDropElement extends HTMLElement {
     if (event.dataTransfer === null) return;
     this._reset();
     const action = 'drop';
-    const files = getFileData(event.dataTransfer, this.accept, (this.multiple !== null));
+    // tslint:disable-next-line:max-line-length
+    const files = this.getFileData(event.dataTransfer, this.accept, (this.multiple !== null), (this.directory !== null), action);
     if (files === undefined) return;
-
-    this.dispatchEvent(new FileDropEvent('filedrop', { action, files }));
+    // this.dispatchEvent(new FileDropEvent('filedrop', { action, files }));
   }
 
   private _onPaste(event: ClipboardEvent) {
     const action = 'paste';
-    if(!event.clipboardData) return;
-    const files = getFileData(event.clipboardData, this.accept, (this.multiple !== undefined));
+    if (!event.clipboardData) return;
+    // tslint:disable-next-line:max-line-length
+    const files = this.getFileData(event.clipboardData, this.accept, (this.multiple !== undefined), (this.directory !== null), action);
     if (files === undefined) return;
 
-    this.dispatchEvent(new FileDropEvent('filedrop', { action, files }));
+    // this.dispatchEvent(new FileDropEvent('filedrop', { action, files }));
   }
 
   private _reset() {
+    this.files = [];
     this._dragEnterCount = 0;
     this.classList.remove('drop-valid');
     this.classList.remove('drop-invalid');
